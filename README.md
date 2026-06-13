@@ -1,4 +1,4 @@
-# oneko in rust 🐈
+# oneko in rust
 
 A rewrite of the classic [**oneko**](https://github.com/tie/oneko) desktop cat, in **Rust**, for **Arch Linux + Hyprland**.
 

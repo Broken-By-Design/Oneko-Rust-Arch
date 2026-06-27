@@ -500,18 +500,30 @@ fn mouse_pos() -> (f32, f32) {
 }
 
 const SIZE: u32 = 32;
+const BLANK: [u8; 128] = [0; 128];
+
+struct OutputSurface {
+    output_id: u32,
+    output: wl_output::WlOutput,
+    layer: LayerSurface,
+    _input_region: Region,
+    configured: bool,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
 
 struct Cat {
     registry_state: RegistryState,
     output_state: OutputState,
+    compositor: CompositorState,
+    layer_shell: LayerShell,
     shm: Shm,
     pool: SlotPool,
-    layer: LayerSurface,
-    _input_region: Region,
-    configured: bool,
+    outputs: Vec<OutputSurface>,
+    active_output_id: Option<u32>,
     exit: bool,
-    screen_w: f32,
-    screen_h: f32,
     win_x: f32,
     win_y: f32,
     last_cursor: (f32, f32),
@@ -521,18 +533,98 @@ struct Cat {
 }
 
 impl Cat {
-    fn update_screen_size(&mut self, output: &wl_output::WlOutput) {
-        if let Some((w, h)) = self
-            .output_state
-            .info(output)
-            .and_then(|info| info.logical_size)
-        {
-            self.screen_w = w as f32;
-            self.screen_h = h as f32;
+    fn configure_layer(layer: &LayerSurface) {
+        layer.set_anchor(Anchor::TOP | Anchor::LEFT);
+        layer.set_size(SIZE, SIZE);
+        layer.set_exclusive_zone(-1);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    }
+
+    fn output_geometry(&self, output: &wl_output::WlOutput) -> Option<(u32, f32, f32, f32, f32)> {
+        let info = self.output_state.info(output)?;
+        let (x, y) = info.logical_position.unwrap_or(info.location);
+        let (w, h) = info
+            .logical_size
+            .or_else(|| info.modes.iter().find(|m| m.current).map(|m| m.dimensions))
+            .or_else(|| info.modes.first().map(|m| m.dimensions))?;
+
+        Some((info.id, x as f32, y as f32, w as f32, h as f32))
+    }
+
+    fn ensure_output_surface(&mut self, qh: &QueueHandle<Self>, output: &wl_output::WlOutput) {
+        let Some((output_id, x, y, w, h)) = self.output_geometry(output) else {
+            return;
+        };
+
+        if let Some(idx) = self.outputs.iter().position(|entry| entry.output == *output) {
+            let entry = &mut self.outputs[idx];
+            entry.output_id = output_id;
+            entry.x = x;
+            entry.y = y;
+            entry.w = w;
+            entry.h = h;
+            return;
         }
+
+        let surface = self.compositor.create_surface(qh);
+        let layer = self.layer_shell.create_layer_surface(
+            qh,
+            surface,
+            Layer::Overlay,
+            Some("oneko"),
+            Some(output),
+        );
+        Self::configure_layer(&layer);
+
+        let input_region = Region::new(&self.compositor).expect("create input region");
+        layer.wl_surface().set_input_region(Some(input_region.wl_region()));
+        layer.commit();
+
+        self.outputs.push(OutputSurface {
+            output_id,
+            output: output.clone(),
+            layer,
+            _input_region: input_region,
+            configured: false,
+            x,
+            y,
+            w,
+            h,
+        });
+    }
+
+    fn output_index_by_id(&self, output_id: u32) -> Option<usize> {
+        self.outputs.iter().position(|entry| entry.output_id == output_id)
+    }
+
+    fn pick_output_id_for_point(&self, x: f32, y: f32) -> Option<u32> {
+        if let Some(entry) = self
+            .outputs
+            .iter()
+            .find(|entry| x >= entry.x && x < entry.x + entry.w && y >= entry.y && y < entry.y + entry.h)
+        {
+            return Some(entry.output_id);
+        }
+
+        self.outputs
+            .iter()
+            .min_by(|a, b| {
+                let ax = a.x + a.w * 0.5;
+                let ay = a.y + a.h * 0.5;
+                let bx = b.x + b.w * 0.5;
+                let by = b.y + b.h * 0.5;
+                let da = (x - ax) * (x - ax) + (y - ay) * (y - ay);
+                let db = (x - bx) * (x - bx) + (y - by) * (y - by);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|entry| entry.output_id)
     }
 
     fn tick(&mut self) {
+        if self.outputs.is_empty() {
+            return;
+        }
+
         let (cursor_x, cursor_y) = mouse_pos();
 
         let cursor_moved = (cursor_x - self.last_cursor.0).abs() > 2.0
@@ -558,10 +650,54 @@ impl Cat {
             self.dir = dir_from_delta(dx, dy);
         }
 
-        let max_x = (self.screen_w - SIZE as f32).max(0.0);
-        let max_y = (self.screen_h - SIZE as f32).max(0.0);
-        self.win_x = (self.win_x + dx * 0.3).clamp(0.0, max_x);
-        self.win_y = (self.win_y + dy * 0.3).clamp(0.0, max_y);
+        let target_output_id = self
+            .pick_output_id_for_point(cursor_x, cursor_y)
+            .or(self.active_output_id)
+            .or_else(|| self.outputs.first().map(|entry| entry.output_id));
+
+        let Some(target_output_id) = target_output_id else {
+            return;
+        };
+
+        if self.active_output_id != Some(target_output_id) {
+            if let Some(old_output_id) = self.active_output_id {
+                if let Some(old_idx) = self.output_index_by_id(old_output_id) {
+                    if self.outputs[old_idx].configured {
+                        let old_layer = self.outputs[old_idx].layer.clone();
+                        self.draw(&old_layer, &BLANK, &BLANK);
+                    }
+                }
+            }
+            self.active_output_id = Some(target_output_id);
+        }
+
+        let Some(active_idx) = self.output_index_by_id(target_output_id) else {
+            return;
+        };
+        let (origin_x, origin_y, min_x, max_x, min_y, max_y, local_max_x, local_max_y, layer, configured) = {
+            let output = &self.outputs[active_idx];
+            let min_x = output.x;
+            let min_y = output.y;
+            let max_x = (output.x + output.w - SIZE as f32).max(min_x);
+            let max_y = (output.y + output.h - SIZE as f32).max(min_y);
+            let local_max_x = (output.w - SIZE as f32).max(0.0);
+            let local_max_y = (output.h - SIZE as f32).max(0.0);
+            (
+                output.x,
+                output.y,
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+                local_max_x,
+                local_max_y,
+                output.layer.clone(),
+                output.configured,
+            )
+        };
+
+        self.win_x = (self.win_x + dx * 0.3).clamp(min_x, max_x);
+        self.win_y = (self.win_y + dy * 0.3).clamp(min_y, max_y);
 
         self.frame = !self.frame;
 
@@ -592,14 +728,17 @@ impl Cat {
             },
         };
 
-        // Anchored TOP|LEFT, so the top/left margins are the on-screen position.
-        self.layer.set_margin(self.win_y as i32, 0, 0, self.win_x as i32);
-        self.draw(sprite, mask);
+        if configured {
+            let local_x = (self.win_x - origin_x).clamp(0.0, local_max_x);
+            let local_y = (self.win_y - origin_y).clamp(0.0, local_max_y);
+            layer.set_margin(local_y as i32, 0, 0, local_x as i32);
+            self.draw(&layer, sprite, mask);
+        }
     }
 
     // XBM layout: 4 bytes per row, LSB of each byte is the leftmost pixel.
     // mask bit set + sprite bit set => black, mask only => white, else transparent.
-    fn draw(&mut self, sprite: &[u8; 128], mask: &[u8; 128]) {
+    fn draw(&mut self, layer: &LayerSurface, sprite: &[u8; 128], mask: &[u8; 128]) {
         let (buffer, canvas) = self
             .pool
             .create_buffer(
@@ -624,10 +763,10 @@ impl Cat {
             }
         }
 
-        let surface = self.layer.wl_surface();
+        let surface = layer.wl_surface();
         surface.damage_buffer(0, 0, SIZE as i32, SIZE as i32);
         buffer.attach_to(surface).expect("attach buffer");
-        self.layer.commit();
+        layer.commit();
     }
 }
 
@@ -644,24 +783,41 @@ impl OutputHandler for Cat {
         &mut self.output_state
     }
 
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
-        self.update_screen_size(&output);
+    fn new_output(&mut self, _: &Connection, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        self.ensure_output_surface(qh, &output);
     }
 
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
-        self.update_screen_size(&output);
+    fn update_output(&mut self, _: &Connection, qh: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        self.ensure_output_surface(qh, &output);
     }
 
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        if let Some(idx) = self.outputs.iter().position(|entry| entry.output == output) {
+            let removed = self.outputs.remove(idx);
+            if self.active_output_id == Some(removed.output_id) {
+                self.active_output_id = None;
+            }
+        }
+    }
 }
 
 impl LayerShellHandler for Cat {
-    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
-        self.exit = true;
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
+        if let Some(idx) = self.outputs.iter().position(|entry| entry.layer == *layer) {
+            let removed = self.outputs.remove(idx);
+            if self.active_output_id == Some(removed.output_id) {
+                self.active_output_id = None;
+            }
+        }
+        if self.outputs.is_empty() {
+            self.exit = true;
+        }
     }
 
-    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface, _: LayerSurfaceConfigure, _: u32) {
-        self.configured = true;
+    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface, _: LayerSurfaceConfigure, _: u32) {
+        if let Some(entry) = self.outputs.iter_mut().find(|entry| entry.layer == *layer) {
+            entry.configured = true;
+        }
     }
 }
 
@@ -693,34 +849,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let layer_shell = LayerShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
 
-    let surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("oneko"), None);
-    layer.set_anchor(Anchor::TOP | Anchor::LEFT);
-    layer.set_size(SIZE, SIZE);
-    // Position relative to the full output, ignoring bars' reserved space.
-    layer.set_exclusive_zone(-1);
-    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-
-    // Empty input region: clicks pass through the cat.
-    let input_region = Region::new(&compositor)?;
-    layer.wl_surface().set_input_region(Some(input_region.wl_region()));
-
-    layer.commit();
-
     let pool = SlotPool::new((SIZE * SIZE * 4) as usize, &shm)?;
 
     let (init_x, init_y) = mouse_pos();
     let mut cat = Cat {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &qh),
+        compositor,
+        layer_shell,
         shm,
         pool,
-        layer,
-        _input_region: input_region,
-        configured: false,
+        outputs: Vec::new(),
+        active_output_id: None,
         exit: false,
-        screen_w: 1920.0,
-        screen_h: 1080.0,
         win_x: init_x,
         win_y: init_y,
         last_cursor: (init_x, init_y),
@@ -730,7 +871,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     while !cat.exit {
-        if cat.configured {
+        if cat.outputs.iter().any(|entry| entry.configured) {
             cat.tick();
         }
         // Flushes pending requests (margin + buffer commit) and processes events.

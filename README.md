@@ -58,7 +58,7 @@ Stop it with `pkill oneko-rust`.
 
 ## Limitations
 
-- Single-monitor: the layer surface lives on the monitor it spawns on, while cursor coordinates are global. Multi-monitor support would need per-output surfaces.
+- Cursor tracking still depends on `hyprctl cursorpos`, so this currently targets Hyprland.
 
 ## Credits
 

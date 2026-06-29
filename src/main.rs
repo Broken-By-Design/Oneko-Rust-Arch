@@ -737,7 +737,6 @@ struct OutputSurface {
     output_id: u32,
     output: wl_output::WlOutput,
     layer: LayerSurface,
-    // _input_region: Region,
     configured: bool,
     x: f32,
     y: f32,
@@ -745,6 +744,11 @@ struct OutputSurface {
     h: f32,
     local_x: f32,
     local_y: f32,
+    // Track last drawn state to avoid redundant compositor commits
+    last_drawn_x: Option<i32>,
+    last_drawn_y: Option<i32>,
+    last_sprite: Option<*const u8>,
+    last_active: Option<bool>,
 }
 
 struct Cat {
@@ -832,6 +836,10 @@ impl Cat {
             h,
             local_x: 0.0,
             local_y: 0.0,
+            last_drawn_x: None,
+            last_drawn_y: None,
+            last_sprite: None,
+            last_active: None,
         });
     }
 
@@ -1158,12 +1166,27 @@ impl Cat {
                 self.outputs[idx].local_x = local_x;
                 self.outputs[idx].local_y = local_y;
 
-                layer.set_margin(local_y as i32, 0, 0, local_x as i32);
+                let target_sprite = if is_active { sprite } else { &BLANK };
+                let target_mask = if is_active { mask } else { &BLANK };
 
-                if is_active {
-                    self.draw(&layer, sprite, mask, true);
-                } else {
-                    self.draw(&layer, &BLANK, &BLANK, false);
+                let x_int = local_x as i32;
+                let y_int = local_y as i32;
+                let sprite_ptr = target_sprite.as_ptr();
+
+                // Skip commits if state did not change
+                let changed = self.outputs[idx].last_drawn_x != Some(x_int)
+                    || self.outputs[idx].last_drawn_y != Some(y_int)
+                    || self.outputs[idx].last_sprite != Some(sprite_ptr)
+                    || self.outputs[idx].last_active != Some(is_active);
+
+                if changed {
+                    layer.set_margin(y_int, 0, 0, x_int);
+                    self.draw(&layer, target_sprite, target_mask, is_active);
+
+                    self.outputs[idx].last_drawn_x = Some(x_int);
+                    self.outputs[idx].last_drawn_y = Some(y_int);
+                    self.outputs[idx].last_sprite = Some(sprite_ptr);
+                    self.outputs[idx].last_active = Some(is_active);
                 }
             }
         }

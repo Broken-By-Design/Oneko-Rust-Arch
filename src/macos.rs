@@ -1,4 +1,9 @@
 #[cfg(target_os = "macos")]
+mod pet;
+#[cfg(target_os = "macos")]
+mod sprites;
+
+#[cfg(target_os = "macos")]
 mod app {
     use std::{thread, time::Duration};
 
@@ -6,11 +11,8 @@ mod app {
     use device_query::{DeviceQuery, DeviceState};
     use minifb::{Key, Window, WindowOptions};
 
-    mod pet;
-    mod sprites;
-
-    use pet::{dir_from_delta, select_sprite, CatState, Dir, PetAction};
-    use sprites::SIZE;
+    use crate::pet::{dir_from_delta, select_sprite, CatState, Dir, PetAction};
+    use crate::sprites::SIZE;
 
     struct MacCat {
         win_x: f32,

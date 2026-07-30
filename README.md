@@ -1,44 +1,63 @@
 # oneko in rust
 
-A rewrite of the classic [**oneko**](https://github.com/tie/oneko) desktop cat, in **Rust**, for **Arch Linux + Hyprland**.
+A rewrite of the classic [**oneko**](https://github.com/tie/oneko) desktop cat, in **Rust**, with:
 
-A little pixel-art cat chases your cursor around the screen. When you stop moving the mouse it sits down, washes itself, and eventually falls asleep — just like the 1990s X11 original, but running natively on Wayland.
+- a **Wayland/Linux** build (original `oneko-rust`)
+- a separate **macOS** build (`oneko-rust-macos`)
+
+A little pixel-art cat chases your cursor around the screen. When you stop moving the mouse it sits down, washes itself, and eventually falls asleep.
 
 ![demo](demo.gif)
 
 ## Why a rewrite?
 
-The original oneko (and most clones) rely on X11 tricks — override-redirect windows and the SHAPE extension — that don't work under Wayland compositors like Hyprland. This version uses:
+The original oneko (and most clones) rely on X11 tricks — override-redirect windows and the SHAPE extension — that don't work under modern compositors.
+
+The Linux build uses:
 
 - **`wlr-layer-shell`** (via [smithay-client-toolkit](https://crates.io/crates/smithay-client-toolkit)) for an always-on-top overlay surface
-- **ARGB transparency** instead of the X11 SHAPE extension
-- **`hyprctl cursorpos`** to track the cursor globally
-- An **empty input region**, so the cat never blocks your clicks or steals focus
+- ARGB transparency
 
-The original 32×32 XBM sprites are embedded directly in the binary — no asset files needed.
+The macOS build is implemented as a separate binary and reuses the same sprite set and behavior state machine.
 
 ## Requirements
 
-- Arch Linux (or any Linux distro, really)
-- [Hyprland](https://hypr.land) — the cursor tracking uses `hyprctl`; any other wlroots-based compositor would need a different cursor source
-- Rust toolchain (`rustup` or `pacman -S rust`)
+### Linux (Wayland)
+
+- Linux + Wayland compositor
+- Rust toolchain (`rustup` / distro package)
+
+### macOS
+
+- macOS
+- Rust toolchain (`rustup`)
+- Accessibility permission may be required for global mouse tracking
 
 ## Build & run
 
+### Linux / Wayland build
+
 ```sh
-cargo build --release
+cargo build --release --bin oneko-rust
 ./target/release/oneko-rust
 ```
 
-## Install
+### macOS build
 
-Run the install script to build the release binary, copy it to `~/.local/bin`, and optionally add a Hyprland autostart entry:
+```sh
+cargo build --release --bin oneko-rust-macos
+./target/release/oneko-rust-macos
+```
+
+## Install (Linux helper script)
+
+Run the install script to build the Linux release binary, copy it to `~/.local/bin`, and optionally add a Hyprland autostart entry:
 
 ```sh
 ./install.sh
 ```
 
-## Autostart with Hyprland
+## Autostart with Hyprland (Linux)
 
 Add the binary to your Hyprland autostart. Classic config (`hyprland.conf`):
 
@@ -54,11 +73,7 @@ hl.on("hyprland.start", function()
 end)
 ```
 
-Stop it with `pkill oneko-rust`.
-
-## Limitations
-
-- Cursor tracking still depends on `hyprctl cursorpos`, so this currently targets Hyprland.
+Stop it with `pkill oneko-rust` (Linux) or `pkill oneko-rust-macos` (macOS).
 
 ## Credits
 

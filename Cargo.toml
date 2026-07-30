@@ -5,3 +5,16 @@ edition = "2021"
 
 [dependencies]
 smithay-client-toolkit = "0.19"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+device_query = "2.1"
+minifb = "0.27"
+
+[[bin]]
+name = "oneko-rust"
+path = "src/main.rs"
+
+[[bin]]
+name = "oneko-rust-macos"
+path = "src/macos.rs"
